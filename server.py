@@ -1,31 +1,20 @@
 from flask import Flask, request, jsonify
-import pandas as pd
 import numpy as np
 from gensim.models import Word2Vec
 from sklearn.metrics.pairwise import cosine_similarity
 from gensim.utils import simple_preprocess
 import gensim.downloader as api
 from flask_cors import CORS
+import dropbox
+from io import BytesIO
+import pandas as pd
 
 app = Flask(__name__)
 
 # Enable CORS
 CORS(app, resources={r"*": {"origins": "exp://192.168.74.112:8081"}})
 
-# Load or initialize the dataset and Word2Vec model
-df = pd.read_csv("data.csv")
-
-# Ensure "title" column contains string values
-df["title"] = df["title"].astype(str)
-
-# Handle missing or non-string values in the "description" column
-df["description"] = df["description"].fillna("")
-df["description"] = df["description"].astype(str)
-
-# Tokenize content for Word2Vec using simple_preprocess
-df["tokenized_source"] = df["description"].apply(lambda text: simple_preprocess(text))
-
-# Load the pre-trained Word2Vec model (Google News)
+# Load or initialize the Word2Vec model
 model_word2vec = api.load("word2vec-google-news-300")
 
 user_article_title = None
@@ -45,8 +34,31 @@ def recommend_articles():
         if user_article_title is None:
             return jsonify({"error": "No article title received"}), 400
 
-        tokenized_user_title = simple_preprocess(user_article_title)
+        # Download data.csv file from Dropbox
+        dbx = dropbox.Dropbox(
+            "sl.Br6euBNUFQUwCEIh0cLW15-l_bZ9NrZ6AA6-gO0elcyT29PaYKHELQbaiExf4uYsc0QSB5rPiYnY8R0EEqP2BtfQoyyRJFwYswin6qTYV9lskudnh-k0UIpeLKT9MZHIhTQWlJsz2g_I"
+        )
+        file_path = "/data.csv"
+        _, res = dbx.files_download(file_path)
+        data = res.content
+
+        # Read data from Dropbox content
+        df = pd.read_csv(BytesIO(data))
+
+        # Ensure "title" column contains string values
+        df["title"] = df["title"].astype(str)
+
+        # Handle missing or non-string values in the "description" column
+        df["description"] = df["description"].fillna("")
+        df["description"] = df["description"].astype(str)
+
+        # Tokenize content for Word2Vec using simple_preprocess
+        df["tokenized_source"] = df["description"].apply(
+            lambda text: simple_preprocess(text)
+        )
+
         # Calculate word vectors for user input title
+        tokenized_user_title = simple_preprocess(user_article_title)
         user_title_vector = np.mean(
             [
                 model_word2vec[word]
@@ -55,29 +67,24 @@ def recommend_articles():
             ],
             axis=0,
         )
-        # Drop rows with NaN values in the tokenized_source column
-        df.dropna(subset=["tokenized_source"], inplace=True)
 
         # Calculate similarity scores between user title and articles' titles
-        similarity_scores_titles = []
-        for tokens in df["tokenized_source"]:
-            if tokens and all(word in model_word2vec.key_to_index for word in tokens):
-                similarity = cosine_similarity(
-                    user_title_vector.reshape(1, -1),
-                    np.mean(
-                        [
-                            model_word2vec[word]
-                            for word in tokens
-                            if word in model_word2vec.key_to_index
-                        ],
-                        axis=0,
-                    ).reshape(1, -1),
-                )
-                similarity_scores_titles.append(similarity[0][0])
-            else:
-                similarity_scores_titles.append(
-                    0
-                )  # Consider zero similarity for empty tokens or missing words
+        similarity_scores_titles = [
+            cosine_similarity(
+                user_title_vector.reshape(1, -1),
+                np.mean(
+                    [
+                        model_word2vec[word]
+                        for word in tokens
+                        if word in model_word2vec.key_to_index
+                    ],
+                    axis=0,
+                ).reshape(1, -1),
+            )[0][0]
+            if tokens and all(word in model_word2vec.key_to_index for word in tokens)
+            else 0
+            for tokens in df["tokenized_source"]
+        ]
 
         # Get the indices of top similar articles based on title similarity scores
         similar_articles_indices = sorted(
